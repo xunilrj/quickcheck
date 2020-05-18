@@ -345,6 +345,62 @@ fn debug_reprs(args: &[&dyn Debug]) -> Vec<String> {
     args.iter().map(|x| format!("{:?}", x)).collect()
 }
 
+#[cfg(target_os = "linux")]
+mod unix {
+    use io::{BufRead, Write};
+    use std::{
+        fs::File,
+        io::{self, BufReader},
+        path::Path,
+    };
+
+    fn lines_from_file(filename: impl AsRef<Path>) -> io::Result<Vec<String>> {
+        BufReader::new(File::open(filename)?).lines().collect()
+    }
+
+    pub fn wait_unix() {
+        let mut looping = 20;
+        while looping > 0 {
+            print!("{:>03}\r", looping);
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            let lines = lines_from_file("/proc/self/status").unwrap();
+            for line in lines {
+                if line.starts_with("TracerPid") {
+                    let tid_str = line.split(":").nth(1).unwrap();
+                    let tid = tid_str.trim().parse::<i32>().unwrap();
+                    if tid != 0 {
+                        looping = 0;
+                        break;
+                    }
+                }
+            }
+            looping -= 1;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    #[link(name = "kernel32")]
+    extern "stdcall" {
+        pub fn IsDebuggerPresent() -> bool;
+    }
+
+    pub fn wait_windows() {
+        let mut looping = 20;
+        while looping > 0 {
+            print!("{:>03}\r", looping);
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if IsDebuggerPresent() {
+                break;
+            }
+            looping -= 1;
+        }
+    }
+}
+
 macro_rules! testable_fn {
     ($($name: ident),*) => {
 
@@ -375,6 +431,21 @@ impl<T: Testable,
                     return Some(shrunk.unwrap_or(r_new))
                 }
             }
+
+            // wait on fail to allow user to attach debug
+            if env::args().any(|x| x == "--wait-on-fail") {
+                println!("Process Id: [{}]", std::process::id());
+
+                #[cfg(target_os = "linux")]
+                unix::wait_unix();
+
+                #[cfg(target_os = "windows")]
+                windows::wait_windows();
+
+                let ( $($name,)* ) = a.clone();
+                self_($($name,)*);
+            }
+
             None
         }
 
